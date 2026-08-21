@@ -3,3 +3,4 @@ tgcrypto
 python-dotenv
 psutil
 uvloop
+opencv-python
