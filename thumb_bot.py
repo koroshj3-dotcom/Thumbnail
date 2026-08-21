@@ -5,8 +5,6 @@ import asyncio
 import logging
 import sqlite3
 import threading
-import subprocess
-import imageio_ffmpeg
 from dotenv import load_dotenv
 
 try:
@@ -21,7 +19,6 @@ asyncio.set_event_loop(loop)
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait
 
 try:
     import psutil
@@ -43,29 +40,9 @@ if not API_ID_STR or not API_HASH or not BOT_TOKEN:
 API_ID = int(API_ID_STR)
 ADMIN_ID = int(ADMIN_ID_STR) if ADMIN_ID_STR else 0
 THUMB_FILE = "intro.jpg"
+THUMB_FILE_ID = None  # ذخیره متغیری file_id عکست روی تلگرام برای ارسال فوری
 
 logging.basicConfig(level=logging.INFO)
-
-def embed_thumbnail_ffmpeg(video_in, thumb_path, video_out):
-    """جایگزینی فریم اول ویدیو با عکس کاور جهت اجبار تلگرام به نمایش تامنیل"""
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    
-    # این دستور عکس کاور را روی فریم 0 ویدیو قرار می‌دهد تا تلگرام چاره‌ای جز نمایش آن نداشته باشد
-    cmd = [
-        ffmpeg_exe, "-y",
-        "-loop", "1", "-i", thumb_path,
-        "-i", video_in,
-        "-filter_complex", "[0:v]scale=iw:ih[thumb];[1:v][thumb]overlay=0:0:enable='between(t,0,0.1)'[v]",
-        "-map", "[v]",
-        "-map", "1:a?",
-        "-c:a", "copy",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "28",
-        "-shortest",
-        video_out
-    ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 # --- وب‌سرور زنده نگه داشتن ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -113,28 +90,13 @@ def update_db_status(item_id, status):
     conn.commit()
     conn.close()
 
-app = Client("fast_thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4)
+app = Client("fast_thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=8)
 user_sessions = {}
 
 def get_session(user_id):
     if user_id not in user_sessions:
         user_sessions[user_id] = {'queue': [], 'is_processing': False, 'dashboard_msg': None, 'cancel_flag': False}
     return user_sessions[user_id]
-
-def make_progress_bar(current, total):
-    percentage = current * 100 / total if total > 0 else 0
-    completed = int(percentage / 10)
-    bar = "█" * completed + "░" * (10 - completed)
-    return f"[{bar}] {percentage:.1f}%"
-
-async def telegram_progress(current, total, user_id, action_text, last_edit):
-    session = get_session(user_id)
-    if session['cancel_flag']: raise Exception("Cancelled")
-    now = time.time()
-    if now - last_edit[0] >= 3 or current == total:
-        last_edit[0] = now
-        bar = make_progress_bar(current, total)
-        await update_dashboard(user_id, current_action=f"{action_text}\n{bar}")
 
 async def update_dashboard(user_id, current_action=""):
     session = get_session(user_id)
@@ -143,7 +105,7 @@ async def update_dashboard(user_id, current_action=""):
     text = "📊 **داشبورد وضعیت ویدیوها**\n\n"
     for i, item in enumerate(queue):
         if item['status'] == 'completed': text += f"✅ ویدیو {i+1}: انجام شد\n"
-        elif item['status'] == 'processing': text += f"🔄 ویدیو {i+1}: در حال پردازش\n{current_action}\n"
+        elif item['status'] == 'processing': text += f"🔄 ویدیو {i+1}: در حال پردازش سریع...\n"
         elif item['status'] == 'waiting': text += f"🕒 ویدیو {i+1}: صف انتظار...\n"
         elif item['status'] == 'cancelled': text += f"❌ ویدیو {i+1}: لغو شد\n"
             
@@ -153,9 +115,16 @@ async def update_dashboard(user_id, current_action=""):
     except Exception: pass
 
 async def process_user_queue(client: Client, user_id: int):
+    global THUMB_FILE_ID
     session = get_session(user_id)
     session['is_processing'] = True
     
+    # اول یک‌بار عکست را آپلود می‌کنیم تا file_id آن را در حافظه نگه‌داریم
+    if not THUMB_FILE_ID and os.path.exists(THUMB_FILE):
+        sent_photo = await client.send_photo(chat_id=user_id, photo=THUMB_FILE)
+        THUMB_FILE_ID = sent_photo.photo.file_id
+        await sent_photo.delete()
+
     while True:
         waiting_items = [item for item in session['queue'] if item['status'] == 'waiting']
         if not waiting_items or session['cancel_flag']: break
@@ -166,31 +135,20 @@ async def process_user_queue(client: Client, user_id: int):
         update_db_status(db_id, 'processing')
         
         message = current_item['message']
-        input_path = f"raw_{message.id}.mp4"
-        output_path = f"final_{message.id}.mp4"
+        video_obj = message.video or message.document
         
         try:
-            last_edit = [0]
-            input_path = await message.download(
-                file_name=input_path, progress=telegram_progress, progress_args=(user_id, "📥 دانلود روی سرور...", last_edit)
-            )
-
-            await update_dashboard(user_id, "⚙️ در حال تزریق کاور به فایل ویدیو...")
-            # چسباندن کاور به شاسی ویدیو بدون رندر مجدد (فوق‌العاده سریع)
-            embed_thumbnail_ffmpeg(input_path, THUMB_FILE, output_path)
-
-            last_edit = [0]
+            # ارسال آنی مستقیماً از طریق file_id تلگرام (بدون دانلود و آپلود)
             await client.send_video(
                 chat_id=message.chat.id, 
-                video=output_path, 
-                thumb=THUMB_FILE,
+                video=video_obj.file_id, 
+                thumb=THUMB_FILE_ID or THUMB_FILE,
                 caption=message.caption or "✅ کاور اختصاصی تنظیم شد.",
-                supports_streaming=True,
-                progress=telegram_progress, progress_args=(user_id, "📤 ارسال به تلگرام...", last_edit)
+                supports_streaming=True
             )
             current_item['status'] = 'completed'
             update_db_status(db_id, 'completed')
-            await update_dashboard(user_id, "✅ با موفقیت ارسال شد")
+            await update_dashboard(user_id)
             
         except Exception as e:
             if str(e) == "Cancelled":
@@ -200,9 +158,6 @@ async def process_user_queue(client: Client, user_id: int):
                 logging.error(f"Error: {e}")
                 current_item['status'] = 'error'
                 update_db_status(db_id, 'error')
-        finally:
-            if os.path.exists(input_path): os.remove(input_path)
-            if os.path.exists(output_path): os.remove(output_path)
 
     if session['cancel_flag']: await session['dashboard_msg'].edit_text("🛑 عملیات لغو شد.")
     else:
@@ -257,7 +212,7 @@ async def start_cmd(_, message: Message):
 @app.on_message(filters.video | filters.document)
 async def handle_incoming_video(client: Client, message: Message):
     if message.document and not message.document.mime_type.startswith("video/"): return
-    if not os.path.exists(THUMB_FILE):
+    if not os.path.exists(THUMB_FILE) and not THUMB_FILE_ID:
         return await message.reply_text(f"❌ عکس {THUMB_FILE} روی سرور پیدا نشد!")
 
     user_id = message.from_user.id
@@ -265,7 +220,7 @@ async def handle_incoming_video(client: Client, message: Message):
     session = get_session(user_id)
     session['queue'].append({'db_id': db_id, 'message': message, 'status': 'waiting'})
     
-    if not session['dashboard_msg']: session['dashboard_msg'] = await message.reply_text("📊 داشبورد فعال شد...")
+    if not session['dashboard_msg']: session['dashboard_msg'] = await message.reply_text("⚡ در حال پردازش آنی...")
     else: await update_dashboard(user_id)
 
     if not session['is_processing']: asyncio.create_task(process_user_queue(client, user_id))
@@ -280,7 +235,7 @@ async def cancel_callback(client, callback_query: CallbackQuery):
 async def main():
     init_db()
     await app.start()
-    logging.info("🚀 Fast Thumb Bot Started!")
+    logging.info("🚀 Ultra Fast Thumb Bot Started!")
     await idle()
     await app.stop()
 
