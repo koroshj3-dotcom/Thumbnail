@@ -7,7 +7,6 @@ import sqlite3
 import threading
 from dotenv import load_dotenv
 
-# ۱. ساخت ایونت‌لوپ پیش از import کردن پایروگرام
 try:
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -17,6 +16,12 @@ except ImportError:
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
+import cv2  # برای استخراج ابعاد و زمان ویدیو بدون رندر
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from pyrogram import Client, filters, idle
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import FloodWait
+
 try:
     import psutil
     HAS_PSUTIL = True
@@ -24,12 +29,6 @@ except ImportError:
     HAS_PSUTIL = False
 
 load_dotenv()
-
-# ۲. حالا پایروگرام بدون ارور import می‌شود
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait
 
 API_ID_STR = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
@@ -42,11 +41,22 @@ if not API_ID_STR or not API_HASH or not BOT_TOKEN:
 
 API_ID = int(API_ID_STR)
 ADMIN_ID = int(ADMIN_ID_STR) if ADMIN_ID_STR else 0
-THUMB_FILE = "intro.png"
+THUMB_FILE = "intro.jpg" # تغییر به JPG برای سازگاری کامل با تلگرام
 
 logging.basicConfig(level=logging.INFO)
 
-# --- وب‌سرور برای زنده نگه داشتن ---
+def get_video_metadata(video_path):
+    """استخراج سریع ابعاد و مدت زمان ویدیو"""
+    cap = cv2.VideoCapture(video_path)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = int(frame_count / fps) if fps > 0 else 0
+    cap.release()
+    return width, height, duration
+
+# --- وب‌سرور ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -62,7 +72,7 @@ def start_health_check_server():
 
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
-# --- دیتابیس صف انتظار ---
+# --- دیتابیس ---
 def init_db():
     conn = sqlite3.connect("thumb_database.db")
     c = conn.cursor()
@@ -92,15 +102,7 @@ def update_db_status(item_id, status):
     conn.commit()
     conn.close()
 
-# --- کلاینت تلگرام ---
-app = Client(
-    "fast_thumb_bot", 
-    api_id=API_ID, 
-    api_hash=API_HASH, 
-    bot_token=BOT_TOKEN,
-    workers=4
-)
-
+app = Client("fast_thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4)
 user_sessions = {}
 
 def get_session(user_id):
@@ -116,9 +118,7 @@ def make_progress_bar(current, total):
 
 async def telegram_progress(current, total, user_id, action_text, last_edit):
     session = get_session(user_id)
-    if session['cancel_flag']:
-        raise Exception("Cancelled")
-        
+    if session['cancel_flag']: raise Exception("Cancelled")
     now = time.time()
     if now - last_edit[0] >= 3 or current == total:
         last_edit[0] = now
@@ -138,9 +138,7 @@ async def update_dashboard(user_id, current_action=""):
             
     text += f"\nمجموع: {len(queue)}"
     reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 لغو عملیات‌ها", callback_data="cancel_all")]])
-    
     try: await session['dashboard_msg'].edit_text(text, reply_markup=reply_markup)
-    except FloodWait as e: await asyncio.sleep(e.value)
     except Exception: pass
 
 async def process_user_queue(client: Client, user_id: int):
@@ -165,11 +163,17 @@ async def process_user_queue(client: Client, user_id: int):
                 file_name=input_path, progress=telegram_progress, progress_args=(user_id, "📥 دانلود روی سرور...", last_edit)
             )
 
+            # دریافت متا دیتا جهت اعمال صحیح تامنیل در تلگرام
+            width, height, duration = get_video_metadata(input_path)
+
             last_edit = [0]
             await client.send_video(
                 chat_id=message.chat.id, 
                 video=input_path, 
                 thumb=THUMB_FILE,
+                width=width,
+                height=height,
+                duration=duration,
                 caption=message.caption or "✅ کاور اختصاصی تنظیم شد.",
                 supports_streaming=True,
                 progress=telegram_progress, progress_args=(user_id, "📤 ارسال به تلگرام...", last_edit)
