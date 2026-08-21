@@ -7,24 +7,19 @@ import sqlite3
 import threading
 from dotenv import load_dotenv
 
+# حل مشکل uvloop و Event Loop در پایتون 3.12
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass
+
 try:
     import psutil
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
 
-try:
-    import uvloop
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-except ImportError:
-    pass
-
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait
-
-# بارگذاری متغیرهای محیطی
 load_dotenv()
 
 API_ID_STR = os.environ.get("API_ID")
@@ -38,11 +33,16 @@ if not API_ID_STR or not API_HASH or not BOT_TOKEN:
 
 API_ID = int(API_ID_STR)
 ADMIN_ID = int(ADMIN_ID_STR) if ADMIN_ID_STR else 0
-THUMB_FILE = "intro.png" # اسم عکسی که به عنوان کاور استفاده میشه
+THUMB_FILE = "intro.png"
 
 logging.basicConfig(level=logging.INFO)
 
-# --- وب‌سرور برای زنده نگه داشتن در هاستینگ‌ها ---
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from pyrogram import Client, filters, idle
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import FloodWait
+
+# --- وب‌سرور برای زنده نگه داشتن ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -156,18 +156,16 @@ async def process_user_queue(client: Client, user_id: int):
         input_path = f"video_{message.id}.mp4"
         
         try:
-            # 1. دانلود سریع
             last_edit = [0]
             input_path = await message.download(
                 file_name=input_path, progress=telegram_progress, progress_args=(user_id, "📥 دانلود روی سرور...", last_edit)
             )
 
-            # 2. آپلود با کاور جدید (بدون رندر)
             last_edit = [0]
             await client.send_video(
                 chat_id=message.chat.id, 
                 video=input_path, 
-                thumb=THUMB_FILE, # جایگذاری کاور
+                thumb=THUMB_FILE,
                 caption=message.caption or "✅ کاور اختصاصی تنظیم شد.",
                 supports_streaming=True,
                 progress=telegram_progress, progress_args=(user_id, "📤 ارسال به تلگرام...", last_edit)
@@ -268,4 +266,6 @@ async def main():
     await app.stop()
 
 if __name__ == "__main__":
-    app.run(main())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(main())
