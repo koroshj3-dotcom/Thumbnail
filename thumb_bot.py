@@ -6,6 +6,7 @@ import logging
 import sqlite3
 import threading
 import subprocess
+import imageio_ffmpeg
 from dotenv import load_dotenv
 
 try:
@@ -47,8 +48,9 @@ logging.basicConfig(level=logging.INFO)
 
 def embed_thumbnail_ffmpeg(video_in, thumb_path, video_out):
     """تزریق سخت‌افزاری کاور داخل ویدیو با FFmpeg جهت عبور از کش تلگرام"""
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [
-        "ffmpeg", "-y",
+        ffmpeg_exe, "-y",
         "-i", video_in,
         "-i", thumb_path,
         "-map", "0",
