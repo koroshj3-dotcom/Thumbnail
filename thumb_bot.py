@@ -47,16 +47,22 @@ THUMB_FILE = "intro.jpg"
 logging.basicConfig(level=logging.INFO)
 
 def embed_thumbnail_ffmpeg(video_in, thumb_path, video_out):
-    """تزریق سخت‌افزاری کاور داخل ویدیو با FFmpeg جهت عبور از کش تلگرام"""
+    """جایگزینی فریم اول ویدیو با عکس کاور جهت اجبار تلگرام به نمایش تامنیل"""
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    
+    # این دستور عکس کاور را روی فریم 0 ویدیو قرار می‌دهد تا تلگرام چاره‌ای جز نمایش آن نداشته باشد
     cmd = [
         ffmpeg_exe, "-y",
+        "-loop", "1", "-i", thumb_path,
         "-i", video_in,
-        "-i", thumb_path,
-        "-map", "0",
-        "-map", "1",
-        "-c", "copy",
-        "-disposition:v:1", "attached_pic",
+        "-filter_complex", "[0:v]scale=iw:ih[thumb];[1:v][thumb]overlay=0:0:enable='between(t,0,0.1)'[v]",
+        "-map", "[v]",
+        "-map", "1:a?",
+        "-c:a", "copy",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "28",
+        "-shortest",
         video_out
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
