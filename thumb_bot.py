@@ -7,12 +7,15 @@ import sqlite3
 import threading
 from dotenv import load_dotenv
 
-# حل مشکل uvloop و Event Loop در پایتون 3.12
+# ۱. ساخت ایونت‌لوپ پیش از import کردن پایروگرام
 try:
     import uvloop
-    uvloop.install()
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
     pass
+
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 try:
     import psutil
@@ -21,6 +24,12 @@ except ImportError:
     HAS_PSUTIL = False
 
 load_dotenv()
+
+# ۲. حالا پایروگرام بدون ارور import می‌شود
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from pyrogram import Client, filters, idle
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import FloodWait
 
 API_ID_STR = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
@@ -36,11 +45,6 @@ ADMIN_ID = int(ADMIN_ID_STR) if ADMIN_ID_STR else 0
 THUMB_FILE = "intro.png"
 
 logging.basicConfig(level=logging.INFO)
-
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait
 
 # --- وب‌سرور برای زنده نگه داشتن ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -266,6 +270,4 @@ async def main():
     await app.stop()
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     loop.run_until_complete(main())
