@@ -5,6 +5,7 @@ import asyncio
 import logging
 import sqlite3
 import threading
+import subprocess
 from dotenv import load_dotenv
 
 try:
@@ -16,7 +17,6 @@ except ImportError:
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-import cv2  # برای استخراج ابعاد و زمان ویدیو بدون رندر
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -41,22 +41,25 @@ if not API_ID_STR or not API_HASH or not BOT_TOKEN:
 
 API_ID = int(API_ID_STR)
 ADMIN_ID = int(ADMIN_ID_STR) if ADMIN_ID_STR else 0
-THUMB_FILE = "intro.jpg" # تغییر به JPG برای سازگاری کامل با تلگرام
+THUMB_FILE = "intro.jpg"
 
 logging.basicConfig(level=logging.INFO)
 
-def get_video_metadata(video_path):
-    """استخراج سریع ابعاد و مدت زمان ویدیو"""
-    cap = cv2.VideoCapture(video_path)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = int(frame_count / fps) if fps > 0 else 0
-    cap.release()
-    return width, height, duration
+def embed_thumbnail_ffmpeg(video_in, thumb_path, video_out):
+    """تزریق سخت‌افزاری کاور داخل ویدیو با FFmpeg جهت عبور از کش تلگرام"""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_in,
+        "-i", thumb_path,
+        "-map", "0",
+        "-map", "1",
+        "-c", "copy",
+        "-disposition:v:1", "attached_pic",
+        video_out
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
-# --- وب‌سرور ---
+# --- وب‌سرور زنده نگه داشتن ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -72,7 +75,7 @@ def start_health_check_server():
 
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
-# --- دیتابیس ---
+# --- دیتابیس صف ---
 def init_db():
     conn = sqlite3.connect("thumb_database.db")
     c = conn.cursor()
@@ -155,7 +158,8 @@ async def process_user_queue(client: Client, user_id: int):
         update_db_status(db_id, 'processing')
         
         message = current_item['message']
-        input_path = f"video_{message.id}.mp4"
+        input_path = f"raw_{message.id}.mp4"
+        output_path = f"final_{message.id}.mp4"
         
         try:
             last_edit = [0]
@@ -163,17 +167,15 @@ async def process_user_queue(client: Client, user_id: int):
                 file_name=input_path, progress=telegram_progress, progress_args=(user_id, "📥 دانلود روی سرور...", last_edit)
             )
 
-            # دریافت متا دیتا جهت اعمال صحیح تامنیل در تلگرام
-            width, height, duration = get_video_metadata(input_path)
+            await update_dashboard(user_id, "⚙️ در حال تزریق کاور به فایل ویدیو...")
+            # چسباندن کاور به شاسی ویدیو بدون رندر مجدد (فوق‌العاده سریع)
+            embed_thumbnail_ffmpeg(input_path, THUMB_FILE, output_path)
 
             last_edit = [0]
             await client.send_video(
                 chat_id=message.chat.id, 
-                video=input_path, 
+                video=output_path, 
                 thumb=THUMB_FILE,
-                width=width,
-                height=height,
-                duration=duration,
                 caption=message.caption or "✅ کاور اختصاصی تنظیم شد.",
                 supports_streaming=True,
                 progress=telegram_progress, progress_args=(user_id, "📤 ارسال به تلگرام...", last_edit)
@@ -192,6 +194,7 @@ async def process_user_queue(client: Client, user_id: int):
                 update_db_status(db_id, 'error')
         finally:
             if os.path.exists(input_path): os.remove(input_path)
+            if os.path.exists(output_path): os.remove(output_path)
 
     if session['cancel_flag']: await session['dashboard_msg'].edit_text("🛑 عملیات لغو شد.")
     else:
